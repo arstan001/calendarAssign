@@ -5,7 +5,6 @@ import {
   Dimensions,
   StyleSheet,
   TouchableOpacity,
-  FlatList,
 } from 'react-native';
 import {
   format,
@@ -17,17 +16,33 @@ import {
   startOfWeek,
 } from 'date-fns';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
-const { width } = Dimensions.get('window');
-const ITEM_LENGTH = width / 7;
+import {
+  FlatList,
+  Gesture,
+  GestureDetector,
+} from 'react-native-gesture-handler';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+  interpolate,
+  runOnJS,
+  withSequence,
+} from 'react-native-reanimated';
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const ITEM_LENGTH = SCREEN_WIDTH / 7;
 const ITEMS_PER_PAGE = 7;
 const WEEK_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const CLOSED_HEIGHT = 100;
+const OPEN_HEIGHT = 350;
+const THRESHOLD = 50;
 
-const DateItem = React.memo(({ 
-  date, 
-  onPress, 
-  isToday, 
-  isSelected 
+const DateItem = React.memo(({
+  date,
+  onPress,
+  isToday,
+  isSelected
 }) => (
   <TouchableOpacity
     style={styles.itemContainer}
@@ -60,8 +75,8 @@ const WeekDays = React.memo(() => (
 const CalendarHeader = React.memo(({ currentMonth, nextMonth }) => (
   <View style={styles.header}>
     <Text style={styles.headerDate}>
-      {currentMonth === nextMonth 
-        ? currentMonth 
+      {currentMonth === nextMonth
+        ? currentMonth
         : `${currentMonth} - ${nextMonth}`}
     </Text>
   </View>
@@ -69,11 +84,17 @@ const CalendarHeader = React.memo(({ currentMonth, nextMonth }) => (
 
 const useCalendar = (weekStartsOn = 0, initialDate = null) => {
   const [selectedDate, setSelectedDate] = useState(initialDate);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [currentDate, setCurrentDate] = useState(new Date());
+
   const [visibleDates, setVisibleDates] = useState({
     currentMonth: format(new Date(), 'yyyy MMMM'),
     nextMonth: format(new Date(), 'yyyy MMMM')
   });
-
+  const height = useSharedValue(CLOSED_HEIGHT);
+  const context = useSharedValue({ y: 0 });
+  const monthScrollX = useSharedValue(0);
+  const weekScrollX = useSharedValue(0);
   const getInitialDates = useCallback(() => {
     const last2WeekOfToday = subDays(new Date(), 7 * 2);
     const next2WeekOfToday = addDays(new Date(), 7 * 2);
@@ -83,6 +104,51 @@ const useCalendar = (weekStartsOn = 0, initialDate = null) => {
   }, [weekStartsOn]);
 
   const [calendarDates, setCalendarDates] = useState(() => getInitialDates());
+
+  const verticalGesture = Gesture.Pan()
+    .activeOffsetY([-10, 10])
+    .onStart(() => {
+      context.value = { y: height.value };
+    })
+    .onUpdate((event) => {
+      const newHeight = context.value.y + event.translationY;
+      if (newHeight >= CLOSED_HEIGHT && newHeight <= OPEN_HEIGHT) {
+        height.value = newHeight;
+      }
+    })
+    .onEnd((event) => {
+      const shouldExpand = isExpanded ?
+        -event.translationY < THRESHOLD :
+        event.translationY > THRESHOLD;
+
+      height.value = withSpring(shouldExpand ? OPEN_HEIGHT : CLOSED_HEIGHT, {
+        damping: 15,
+      });
+      runOnJS(setIsExpanded)(shouldExpand);
+    });
+  const horizontalGesture = Gesture.Pan()
+    .activeOffsetX([-10, 10])
+    .onStart(() => {
+      context.value = { x: monthScrollX.value };
+    })
+    .onUpdate((event) => {
+      if (isExpanded) {
+        monthScrollX.value = event.translationX;
+      }
+    })
+    .onEnd((event) => {
+      if (isExpanded && Math.abs(event.translationX) > SCREEN_WIDTH / 3) {
+        const direction = event.translationX > 0 ? -1 : 1;
+        monthScrollX.value = withSequence(
+          withTiming(direction * -SCREEN_WIDTH, { duration: 200 }),
+          withTiming(0, { duration: 0 })
+        );
+        runOnJS(setCurrentDate)(addDays(currentDate, direction * 30));
+      } else {
+        monthScrollX.value = withTiming(0);
+      }
+    });
+  const gesture = Gesture.Exclusive(verticalGesture, horizontalGesture);
 
   const loadMoreDates = useCallback((direction) => {
     setCalendarDates(currentDates => {
@@ -108,7 +174,7 @@ const useCalendar = (weekStartsOn = 0, initialDate = null) => {
   const updateVisibleDates = useCallback((startIndex) => {
     const visibleWeekStart = calendarDates[startIndex];
     const visibleWeekEnd = calendarDates[startIndex + 6];
-    
+
     setVisibleDates({
       currentMonth: format(visibleWeekStart, 'yyyy MMMM'),
       nextMonth: format(visibleWeekEnd, 'yyyy MMMM')
@@ -125,7 +191,12 @@ const useCalendar = (weekStartsOn = 0, initialDate = null) => {
     calendarDates,
     visibleDates,
     loadMoreDates,
-    updateVisibleDates
+    updateVisibleDates,
+    gesture,
+    height,
+    monthScrollX,
+    setCurrentDate,
+    weekScrollX
   };
 };
 
@@ -137,7 +208,12 @@ const Calendar = ({ onPressDate, weekStartsOn = 0, initialDate = null }) => {
     calendarDates,
     visibleDates,
     loadMoreDates,
-    updateVisibleDates
+    updateVisibleDates,
+    gesture,
+    height,
+    monthScrollX,
+    weekScrollX
+
   } = useCalendar(weekStartsOn, initialDate);
 
   const getItemLayout = useCallback((_, index) => ({
@@ -150,7 +226,7 @@ const Calendar = ({ onPressDate, weekStartsOn = 0, initialDate = null }) => {
     const startIndex = Math.floor(event.nativeEvent.contentOffset.x / ITEM_LENGTH);
     updateVisibleDates(startIndex);
 
-    if (event.nativeEvent.contentOffset.x < width) {
+    if (event.nativeEvent.contentOffset.x < SCREEN_WIDTH) {
       loadMoreDates('previous');
       calendarRef.current?.scrollToIndex({
         index: ITEMS_PER_PAGE * 2,
@@ -163,7 +239,14 @@ const Calendar = ({ onPressDate, weekStartsOn = 0, initialDate = null }) => {
     handleDateSelection(date);
     onPressDate?.(date);
   }, [handleDateSelection, onPressDate]);
-
+  const weekViewStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: weekScrollX.value }],
+    opacity: interpolate(
+      height.value,
+      [CLOSED_HEIGHT, OPEN_HEIGHT],
+      [1, 0]
+    ),
+  }));
   const renderItem = useCallback(({ item: date }) => (
     <DateItem
       date={date}
@@ -174,7 +257,69 @@ const Calendar = ({ onPressDate, weekStartsOn = 0, initialDate = null }) => {
   ), [handleDatePress, selectedDate]);
 
   const keyExtractor = useCallback((_, index) => index.toString(), []);
+  const containerAnimatedStyle = useAnimatedStyle(() => ({
+    height: height.value,
+  }));
+  const monthViewStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: monthScrollX.value }],
+    opacity: interpolate(
+      height.value,
+      [CLOSED_HEIGHT, OPEN_HEIGHT],
+      [0, 1]
+    ),
+  }));
+  const parseDateToMonth = () => {
+    const [year, monthName] = visibleDates.currentMonth.split(' ')
+    const monthIndex = [
+      "January", "February", "March", "April", "May", "June", 
+      "July", "August", "September", "October", "November", "December"
+    ].indexOf(monthName);
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    const firstDayOfMonth = new Date(year, monthIndex, 1).getDay();
+    const daysInPrevMonth = new Date(year, monthIndex, 0).getDate();
 
+    const prevMonthDays = Array.from(
+      { length: firstDayOfMonth },
+      (_, i) => new Date(year, monthIndex - 1, daysInPrevMonth - firstDayOfMonth + i + 1)
+    );
+
+    const currentMonthDays = Array.from(
+      { length: daysInMonth },
+      (_, i) => new Date(year, monthIndex, i + 1)
+    );
+    const remainingDays = (7 - ((firstDayOfMonth + daysInMonth) % 7)) % 7;
+
+    const nextMonthDays = Array.from(
+      { length: remainingDays },
+      (_, i) => new Date(year, monthIndex + 1, i + 1)
+    );
+
+    const calendarDays = [...prevMonthDays, ...currentMonthDays, ...nextMonthDays];
+
+    return calendarDays;
+  }
+
+  const renderMonthView = () => {
+    return (
+      <Animated.View style={[styles.monthView, monthViewStyle]}>
+        <FlatList
+          data={parseDateToMonth()}
+          numColumns={7}
+          scrollEnabled={false}
+          renderItem={({ item: date }) => (
+            <DateItem
+              date={date}
+              onPress={handleDatePress}
+              isToday={isSameDay(date, new Date())}
+              isSelected={selectedDate && isSameDay(date, selectedDate)}
+              isCompact={false}
+            />
+          )}
+          keyExtractor={(date) => date.toISOString()}
+        />
+      </Animated.View>
+    );
+  };
   return (
     <SafeAreaView style={styles.container}>
       <CalendarHeader
@@ -182,22 +327,31 @@ const Calendar = ({ onPressDate, weekStartsOn = 0, initialDate = null }) => {
         nextMonth={visibleDates.nextMonth}
       />
       <WeekDays />
-      <FlatList
-        ref={calendarRef}
-        horizontal
-        pagingEnabled
-        bounces={false}
-        showsHorizontalScrollIndicator={false}
-        initialScrollIndex={ITEMS_PER_PAGE * 2}
-        onMomentumScrollEnd={handleMomentumScrollEnd}
-        onEndReached={() => loadMoreDates('next')}
-        onEndReachedThreshold={0.01}
-        scrollEventThrottle={16}
-        getItemLayout={getItemLayout}
-        data={calendarDates}
-        renderItem={renderItem}
-        keyExtractor={keyExtractor}
-      />
+      <GestureDetector gesture={gesture}>
+        <View style={{ position: 'relative' }}>
+          <Animated.View style={[styles.weekView, weekViewStyle]}>
+            <FlatList
+              ref={calendarRef}
+              horizontal
+              pagingEnabled
+              bounces={false}
+              showsHorizontalScrollIndicator={false}
+              initialScrollIndex={ITEMS_PER_PAGE * 2}
+              onMomentumScrollEnd={handleMomentumScrollEnd}
+              onEndReached={() => loadMoreDates('next')}
+              onEndReachedThreshold={0.01}
+              scrollEventThrottle={16}
+              getItemLayout={getItemLayout}
+              data={calendarDates}
+              renderItem={renderItem}
+              keyExtractor={keyExtractor}
+            />
+          </Animated.View>
+          <Animated.View style={[styles.containerAnimated, containerAnimatedStyle]}>
+            {renderMonthView()}
+          </Animated.View>
+        </View>
+      </GestureDetector>
     </SafeAreaView>
   );
 };
@@ -206,6 +360,15 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: 'white',
+  },
+  weekView: {
+    position: 'relative',
+    zIndex: 3
+  },
+  containerAnimated: {
+    backgroundColor: 'white',
+    overflow: 'hidden',
+    position: 'absolute'
   },
   header: {
     height: 40,
